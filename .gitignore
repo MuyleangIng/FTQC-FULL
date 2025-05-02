@@ -1,0 +1,50 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+.idea/
+# Virtual environments
+venv/
+.venv/
+
+# Environment variables
+.env
+.env.*
+
+
+# Logs
+logs/
+*.log
+
+# Figures or output images
+figure/
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.pdf
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# pycache and temp files
+*.pyc
+*.pyo
+*.pyd
+*.swp
+
+# VSCode settings (if using VSCode)
+.vscode/
+
+# macOS and Linux system files
+.DS_Store
+Thumbs.db
+
+
+# test none file
+encode_circuit.py
+ftqc_streaming_api.py
+pipeline_updated.py
+test_t_gate_high_noise.py
+
+

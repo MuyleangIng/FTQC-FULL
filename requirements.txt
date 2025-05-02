@@ -4,6 +4,7 @@ pydantic==2.9.2
 stim==1.13.0
 qiskit==1.2.4
 qiskit-aer==0.15.1
-pymatching==2.0.3
+pymatching==2.2.2
 numpy==2.1.2
 python-dateutil==2.9.0
+matplotlib==3.10.1

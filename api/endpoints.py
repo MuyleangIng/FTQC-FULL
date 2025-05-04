@@ -18,6 +18,7 @@ from core.pipeline import FTQCPipeline
 import asyncio
 import threading
 import queue
+from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy import create_engine, Column, Integer, String, Float, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session as SQLSession
@@ -43,21 +44,24 @@ SessionLocal = sessionmaker(bind=engine)
 class SimulationResult(Base):
     __tablename__ = "simulation_results"
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer)  # Simple integer field, no foreign key
-    job_id = Column(String, unique=True)
-    simulation_id = Column(String, unique=True)
-    result = Column(JSON)
-    timestamp = Column(String)
+    user_id = Column(Integer, nullable=False)
+    job_id = Column(String, unique=True, nullable=False)
+    simulation_id = Column(String, unique=True)  # Nullable
+    result = Column(JSON)  # Nullable
+    timestamp = Column(String, nullable=False)
+    status = Column(String)  # Nullable
 
 
 class JobLog(Base):
     __tablename__ = "job_logs"
     id = Column(Integer, primary_key=True)
-    job_id = Column(String, unique=True)
-    log_file = Column(String)
-    timestamp = Column(String)
+    job_id = Column(String, unique=True, nullable=False)
+    log_file = Column(String, nullable=False)
+    timestamp = Column(String, nullable=False)
 
 
+# Drop and recreate tables to ensure the schema is up-to-date
+Base.metadata.drop_all(engine)
 Base.metadata.create_all(engine)
 
 
@@ -70,33 +74,106 @@ def get_db():
         db.close()
 
 
-# Job Manager
-job_queue = queue.Queue()
-running_jobs = {}
-
-
-class JobManager:
-    def __init__(self):
+# Thread Manager for handling multiple simulation jobs
+class ThreadManager:
+    def __init__(self, max_threads: int = 5):
+        self.job_queue = queue.Queue()
+        self.running_jobs = {}
+        self.max_threads = max_threads
         self.lock = threading.Lock()
+        self.executor = ThreadPoolExecutor(max_workers=max_threads)
+        self.logger = logging.getLogger("ThreadManager")
+        self.logger.setLevel(logging.DEBUG)
 
     def add_job(self, user_id: int, job_func, *args):
         with self.lock:
             job_id = f"job_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
-            running_jobs[job_id] = {"thread": None, "result": None}
-            return job_id
+            self.job_queue.put((job_id, user_id, job_func, args))
+            self.running_jobs[job_id] = {"status": "queued", "result": None}
+            self.logger.debug(f"Job {job_id} queued for user {user_id}")
+        # Perform database operation in a separate thread to avoid blocking
+        threading.Thread(target=self._store_job_in_db, args=(user_id, job_id), daemon=True).start()
+        # Submit the job to the thread pool executor
+        self.executor.submit(self._worker)
+        return job_id
+
+    def _store_job_in_db(self, user_id: int, job_id: str):
+        try:
+            session = SessionLocal()
+            new_result = SimulationResult(
+                user_id=user_id,
+                job_id=job_id,
+                simulation_id=None,
+                result=None,
+                timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                status="queued"
+            )
+            session.add(new_result)
+            session.commit()
+            self.logger.debug(f"Job {job_id} stored in database with status 'queued'")
+        except Exception as e:
+            self.logger.error(f"Failed to store job {job_id} in database: {str(e)}")
+        finally:
+            session.close()
+
+    def _worker(self):
+        try:
+            # Get the next job from the queue
+            job_id, user_id, job_func, args = self.job_queue.get(timeout=1)
+            with self.lock:
+                self.running_jobs[job_id]["status"] = "running"
+                self.logger.debug(f"Job {job_id} started running")
+                # Update status in database
+                session = SessionLocal()
+                job_record = session.query(SimulationResult).filter_by(job_id=job_id).first()
+                if job_record:
+                    job_record.status = "running"
+                    session.commit()
+                session.close()
+
+            # Run the job
+            result = job_func(job_id, *args)
+            with self.lock:
+                self.running_jobs[job_id]["status"] = "completed"
+                self.running_jobs[job_id]["result"] = result
+                self.logger.debug(f"Job {job_id} completed")
+                # Update database with result
+                session = SessionLocal()
+                job_record = session.query(SimulationResult).filter_by(job_id=job_id).first()
+                if job_record:
+                    job_record.status = "completed"
+                    job_record.simulation_id = result.simulation_id
+                    job_record.result = result.result
+                    session.commit()
+                session.close()
+        except queue.Empty:
+            self.logger.debug("Worker stopped due to empty queue")
+        except Exception as e:
+            with self.lock:
+                self.running_jobs[job_id]["status"] = "failed"
+                self.running_jobs[job_id]["result"] = str(e)
+                self.logger.error(f"Job {job_id} failed: {str(e)}")
+                # Update status in database
+                session = SessionLocal()
+                job_record = session.query(SimulationResult).filter_by(job_id=job_id).first()
+                if job_record:
+                    job_record.status = "failed"
+                    job_record.result = {"error": str(e)}
+                    session.commit()
+                session.close()
+        finally:
+            self.job_queue.task_done()
 
     def get_job_status(self, job_id: str):
-        return job_id in running_jobs
-
-    def set_job_result(self, job_id: str, result):
-        if job_id in running_jobs:
-            running_jobs[job_id]["result"] = result
+        with self.lock:
+            return self.running_jobs.get(job_id, {}).get("status", "not found")
 
     def get_job_result(self, job_id: str):
-        return running_jobs.get(job_id, {}).get("result")
+        with self.lock:
+            return self.running_jobs.get(job_id, {}).get("result")
 
 
-job_manager = JobManager()
+thread_manager = ThreadManager(max_threads=5)
 
 # Logging setup
 LOGS_DIR = "logs"
@@ -144,16 +221,17 @@ async def log_streamer(job_id: str) -> AsyncGenerator[str, None]:
             if line:
                 yield f"data: {line.strip()}\n\n"
             else:
-                if not job_manager.get_job_status(job_id):
+                if thread_manager.get_job_status(job_id) not in ["completed", "failed"]:
+                    await asyncio.sleep(0.1)
+                else:
                     break
-                await asyncio.sleep(0.1)
 
 
 # Pydantic models for validation
 class SimulationRequest(BaseModel):
     source_code: str = Field(
         ...,
-        description="Base64-encoded quantum circuit source code. Example: 'ZnJvbSBxaXNraXQgaW1wb3J0IFF1YW50dW1DaXJjdWl0CnFjID0gUXVhbnR1bUNpcmN1aXQoMiwgMikKcWMuaCgwKQpxYy5oKDEpCnFjLnQoMCkKcWMudCgxKQpxYy5jeCgwLCAxKQpxYy5tZWFzdXJlKFswLDFdLCBbMCwxXSkK'"
+        description="Base64-encoded quantum circuit source code. Example: 'ZnJvbSBxaXNraXQgaW1wb3J0IFF1YW50dW1DaXJjdWl0CnFjID0gUXVhbnR1bUNpcmN1aXQoMiwgMikKcWMuaCgwKQpxYy5jeCgwLCAxKQpxYy50KDApCnFjLnQoMSkKcWMubWVhc3VyZShbMCwgMV0sIFswLCAxXSkK'"
     )
     iterations: int = Field(10, ge=1, description="Number of simulation iterations")
     noise: float = Field(0.001, ge=0.0, le=1.0, description="Noise level")
@@ -174,7 +252,7 @@ class SimulationRequest(BaseModel):
                 f"Source code must be a valid Base64-encoded string. "
                 f"Input '{v}' contains invalid characters. "
                 f"Allowed characters are A-Z, a-z, 0-9, +, /, and =. "
-                f"Example of a valid Base64 string: 'ZnJvbSBxaXNraXQgaW1wb3J0IFF1YW50dW1DaXJjdWl0CnFjID0gUXVhbnR1bUNpcmN1aXQoMiwgMikKcWMuaCgwKQpxYy5oKDEpCnFjLnQoMCkKcWMudCgxKQpxYy5jeCgwLCAxKQpxYy5tZWFzdXJlKFswLDFdLCBbMCwxXSkK'. "
+                f"Example of a valid Base64 string: 'ZnJvbSBxaXNraXQgaW1wb3J0IFF1YW50dW1DaXJjdWl0CnFjID0gUXVhbnR1bUNpcmN1aXQoMiwgMikKcWMuaCgwKQpxYy5jeCgwLCAxKQpxYy50KDApCnFjLnQoMSkKcWMubWVhc3VyZShbMCwgMV0sIFswLCAxXSkK'. "
                 f"Use the /encode endpoint to convert your Python code to Base64."
             )
             raise ValueError(error_msg)
@@ -196,7 +274,7 @@ class SimulationRequest(BaseModel):
                 f"Base64 string length must be a multiple of 4. "
                 f"Input '{v}' has length {original_length}, after padding: {len(v_padded)}. "
                 f"Ensure proper padding with '=' characters. "
-                f"Example of a valid Base64 string: 'ZnJvbSBxaXNraXQgaW1wb3J0IFF1YW50dW1DaXJjdWl0CnFjID0gUXVhbnR1bUNpcmN1aXQoMiwgMikKcWMuaCgwKQpxYy5oKDEpCnFjLnQoMCkKcWMudCgxKQpxYy5jeCgwLCAxKQpxYy5tZWFzdXJlKFswLDFdLCBbMCwxXSkK'. "
+                f"Example of a valid Base64 string: 'ZnJvbSBxaXNraXQgaW1wb3J0IFF1YW50dW1DaXJjdWl0CnFjID0gUXVhbnR1bUNpcmN1aXQoMiwgMikKcWMuaCgwKQpxYy5jeCgwLCAxKQpxYy50KDApCnFjLnQoMSkKcWMubWVhc3VyZShbMCwgMV0sIFswLCAxXSkK'. "
                 f"Use the /encode endpoint to convert your Python code to Base64."
             )
             raise ValueError(error_msg)
@@ -208,7 +286,8 @@ class SimulationRequest(BaseModel):
 
             # Validate quantum circuit
             local_vars = {}
-            exec(decoded_str, {"QuantumCircuit": QuantumCircuit, "print": print}, local_vars)
+            # Provide numpy in the globals for exec
+            exec(decoded_str, {"QuantumCircuit": QuantumCircuit, "print": print, "np": np}, local_vars)
             if 'qc' not in local_vars:
                 validation_logger.debug("Decoded code does not define a QuantumCircuit named 'qc'")
                 raise ValueError("Source code must define a QuantumCircuit named 'qc'")
@@ -227,7 +306,8 @@ class SimulationRequest(BaseModel):
                 if gate.name not in allowed_gates:
                     validation_logger.debug(f"Unsupported gate found: {gate.name}")
                     raise ValueError(
-                        f"Unsupported gate '{gate.name}' in circuit. Allowed gates: {allowed_gates}"
+                        f"Unsupported gate '{gate.name}' in circuit. Allowed gates: {allowed_gates}. "
+                        f"If using gates like 'cp' or 'tdg', decompose them into allowed gates (H, T, CX, etc.) before encoding."
                     )
                 qubits = [circuit.find_bit(q).index for q in instruction.qubits]
                 for qubit in qubits:
@@ -247,7 +327,7 @@ class SimulationRequest(BaseModel):
             return v
         except base64.binascii.Error as e:
             validation_logger.debug(f"Base64 decoding failed: {str(e)}")
-            example_base64 = "ZnJvbSBxaXNraXQgaW1wb3J0IFF1YW50dW1DaXJjdWl0CnFjID0gUXVhbnR1bUNpcmN1aXQoMiwgMikKcWMuaCgwKQpxYy5oKDEpCnFjLnQoMCkKcWMudCgxKQpxYy5jeCgwLCAxKQpxYy5tZWFzdXJlKFswLDFdLCBbMCwxXSkK"
+            example_base64 = "ZnJvbSBxaXNraXQgaW1wb3J0IFF1YW50dW1DaXJjdWl0CnFjID0gUXVhbnR1bUNpcmN1aXQoMiwgMikKcWMuaCgwKQpxYy5jeCgwLCAxKQpxYy50KDApCnFjLnQoMSkKcWMubWVhc3VyZShbMCwgMV0sIFswLCAxXSkK"
             error_msg = (
                 f"Invalid Base64 encoding: {str(e)}. "
                 f"Input length: {original_length} characters, after padding: {len(v_padded)} characters. "
@@ -289,7 +369,7 @@ class SimulationUpdate(BaseModel):
                 f"Base64 string length must be a multiple of 4. "
                 f"Input '{v}' has length {len(v)}, after padding: {len(v_padded)}. "
                 f"Ensure proper padding with '=' characters. "
-                f"Example of a valid Base64 string: 'ZnJvbSBxaXNraXQgaW1wb3J0IFF1YW50dW1DaXJjdWl0CnFjID0gUXVhbnR1bUNpcmN1aXQoMiwgMikKcWMuaCgwKQpxYy5oKDEpCnFjLnQoMCkKcWMudCgxKQpxYy5jeCgwLCAxKQpxYy5tZWFzdXJlKFswLDFdLCBbMCwxXSkK'. "
+                f"Example of a valid Base64 string: 'ZnJvbSBxaXNraXQgaW1wb3J0IFF1YW50dW1DaXJjdWl0CnFjID0gUXVhbnR1bUNpcmN1aXQoMiwgMikKcWMuaCgwKQpxYy5jeCgwLCAxKQpxYy50KDApCnFjLnQoMSkKcWMubWVhc3VyZShbMCwgMV0sIFswLCAxXSkK'. "
                 f"Use the /encode endpoint to convert your Python code to Base64."
             )
             raise ValueError(error_msg)
@@ -297,7 +377,7 @@ class SimulationUpdate(BaseModel):
             decoded = base64.b64decode(v_padded, validate=True)
             decoded_str = decoded.decode('utf-8')
             local_vars = {}
-            exec(decoded_str, {"QuantumCircuit": QuantumCircuit, "print": print}, local_vars)
+            exec(decoded_str, {"QuantumCircuit": QuantumCircuit, "print": print, "np": np}, local_vars)
             if 'qc' not in local_vars:
                 raise ValueError("Source code must define a QuantumCircuit named 'qc'")
             circuit = local_vars['qc']
@@ -306,7 +386,8 @@ class SimulationUpdate(BaseModel):
                 gate = instruction.operation
                 if gate.name not in allowed_gates:
                     raise ValueError(
-                        f"Unsupported gate '{gate.name}' in circuit. Allowed gates: {allowed_gates}"
+                        f"Unsupported gate '{gate.name}' in circuit. Allowed gates: {allowed_gates}. "
+                        f"If using gates like 'cp' or 'tdg', decompose them into allowed gates (H, T, CX, etc.) before encoding."
                     )
                 qubits = [circuit.find_bit(q).index for q in instruction.qubits]
                 for qubit in qubits:
@@ -321,7 +402,7 @@ class SimulationUpdate(BaseModel):
                                 f"Classical bit index {clbit} is out of range for circuit with {circuit.num_clbits} classical bits")
             return v
         except base64.binascii.Error as e:
-            example_base64 = "ZnJvbSBxaXNraXQgaW1wb3J0IFF1YW50dW1DaXJjdWl0CnFjID0gUXVhbnR1bUNpcmN1aXQoMiwgMikKcWMuaCgwKQpxYy5oKDEpCnFjLnQoMCkKcWMudCgxKQpxYy5jeCgwLCAxKQpxYy5tZWFzdXJlKFswLDFdLCBbMCwxXSkK"
+            example_base64 = "ZnJvbSBxaXNraXQgaW1wb3J0IFF1YW50dW1DaXJjdWl0CnFjID0gUXVhbnR1bUNpcmN1aXQoMiwgMikKcWMuaCgwKQpxYy5jeCgwLCAxKQpxYy50KDApCnFjLnQoMSkKcWMubWVhc3VyZShbMCwgMV0sIFswLCAxXSkK"
             error_msg = (
                 f"Invalid Base64 encoding: {str(e)}. "
                 f"Input length: {len(v)} characters, after padding: {len(v_padded)} characters. "
@@ -344,14 +425,14 @@ class SimulationResponse(BaseModel):
 router = APIRouter()
 
 
-async def run_simulation_with_timeout(job_id: str, request: SimulationRequest):
+def run_simulation_with_timeout(job_id: str, request: SimulationRequest):
     # Setup logger after validation
     logger = setup_job_logger(job_id)
     logger.info(f"Starting simulation for user {request.user_id}")
     try:
         source_code = base64.b64decode(request.source_code).decode('utf-8')
         local_vars = {}
-        exec(source_code, {"QuantumCircuit": QuantumCircuit, "print": print}, local_vars)
+        exec(source_code, {"QuantumCircuit": QuantumCircuit, "print": print, "np": np}, local_vars)
         circuit = local_vars['qc']  # Already validated in the model
 
         pipeline = FTQCPipeline(
@@ -365,15 +446,7 @@ async def run_simulation_with_timeout(job_id: str, request: SimulationRequest):
             job_id=job_id
         )
 
-        # Run simulation with a 60-second timeout
-        async def run_pipeline():
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, pipeline.run)
-
-        avg_fidelity, logical_error_rate, success_rate, avg_success_prob, msd_attempts = await asyncio.wait_for(
-            run_pipeline(),
-            timeout=60.0
-        )
+        avg_fidelity, logical_error_rate, success_rate, avg_success_prob, msd_attempts = pipeline.run()
 
         if avg_fidelity is None:
             raise ValueError("Simulation failed. Check logs for details.")
@@ -391,39 +464,18 @@ async def run_simulation_with_timeout(job_id: str, request: SimulationRequest):
         with open(json_path, 'w') as f:
             json.dump(result, f, indent=2)
 
-        # Store in PostgreSQL
-        session = SessionLocal()
-        new_result = SimulationResult(
-            user_id=request.user_id,
-            job_id=job_id,
-            simulation_id=simulation_id,
-            result=result,
-            timestamp=timestamp
-        )
-        session.add(new_result)
-        session.commit()
-        session.close()
-
         logger.info(f"Simulation completed with ID {simulation_id}")
         return SimulationResponse(simulation_id=simulation_id, result=result, timestamp=timestamp)
-    except asyncio.TimeoutError:
-        logger.error("Simulation timed out after 60 seconds")
-        raise HTTPException(status_code=504, detail="Simulation timed out after 60 seconds")
     except Exception as e:
         logger.error(f"Error: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise
 
 
-@router.post("/simulate", response_model=SimulationResponse)
+@router.post("/simulate")
 async def simulate(request: SimulationRequest, db: SQLSession = Depends(get_db)):
-    job_id = job_manager.add_job(request.user_id, run_simulation_with_timeout, request)
-    try:
-        response = await run_simulation_with_timeout(job_id, request)
-        job_manager.set_job_result(job_id, response)
-        return response
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Simulation failed: {str(e)}")
+    job_id = thread_manager.add_job(request.user_id, run_simulation_with_timeout, request)
+    return {"job_id": job_id, "status": "queued"}
 
 
 @router.put("/simulate/{job_id}", response_model=SimulationResponse)
@@ -436,12 +488,12 @@ async def update_simulation(job_id: str, update: SimulationUpdate, db: SQLSessio
     # Retrieve original request parameters (we'll use default values as a fallback)
     original_request = SimulationRequest(
         source_code=None,
-        iterations=simulation.result.get("iterations", 10),
-        noise=simulation.result.get("noise", 0.001),
-        distance=simulation.result.get("distance", 3),
-        rounds=simulation.result.get("rounds", 2),
-        error_rate=simulation.result.get("error_rate", 0.01),
-        debug=simulation.result.get("debug", False),
+        iterations=simulation.result.get("iterations", 10) if simulation.result else 10,
+        noise=simulation.result.get("noise", 0.001) if simulation.result else 0.001,
+        distance=simulation.result.get("distance", 3) if simulation.result else 3,
+        rounds=simulation.result.get("rounds", 2) if simulation.result else 2,
+        error_rate=simulation.result.get("error_rate", 0.01) if simulation.result else 0.01,
+        debug=simulation.result.get("debug", False) if simulation.result else False,
         user_id=simulation.user_id
     )
 
@@ -458,17 +510,8 @@ async def update_simulation(job_id: str, update: SimulationUpdate, db: SQLSessio
     )
 
     # Re-run simulation with updated parameters
-    try:
-        response = await run_simulation_with_timeout(job_id, updated_request)
-        # Update database
-        simulation.result = response.result
-        simulation.timestamp = response.timestamp
-        simulation.simulation_id = response.simulation_id
-        db.commit()
-        job_manager.set_job_result(job_id, response)
-        return response
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Simulation update failed: {str(e)}")
+    job_id = thread_manager.add_job(updated_request.user_id, run_simulation_with_timeout, updated_request)
+    return {"job_id": job_id, "status": "queued"}
 
 
 @router.get("/simulate/{job_id}/logs")
@@ -480,7 +523,13 @@ async def stream_logs(job_id: str):
 async def get_simulations(user_id: int, db: SQLSession = Depends(get_db)):
     results = db.query(SimulationResult).filter_by(user_id=user_id).all()
     return [
-        {"job_id": r.job_id, "simulation_id": r.simulation_id, "result": r.result, "timestamp": r.timestamp}
+        {
+            "job_id": r.job_id,
+            "simulation_id": r.simulation_id,
+            "result": r.result,
+            "timestamp": r.timestamp,
+            "status": r.status
+        }
         for r in results
     ]
 
@@ -489,8 +538,13 @@ async def get_simulations(user_id: int, db: SQLSession = Depends(get_db)):
 async def get_simulation_by_job(user_id: int, job_id: str, db: SQLSession = Depends(get_db)):
     result = db.query(SimulationResult).filter_by(user_id=user_id, job_id=job_id).first()
     if result:
-        return {"job_id": result.job_id, "simulation_id": result.simulation_id, "result": result.result,
-                "timestamp": result.timestamp}
+        return {
+            "job_id": result.job_id,
+            "simulation_id": result.simulation_id,
+            "result": result.result,
+            "timestamp": result.timestamp,
+            "status": result.status
+        }
     raise HTTPException(status_code=404, detail="Simulation not found")
 
 

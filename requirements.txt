@@ -8,3 +8,8 @@ pymatching==2.2.2
 numpy==2.1.2
 python-dateutil==2.9.0
 matplotlib==3.10.1
+psycopg2-binary==2.9.10
+pylatexenc==2.10
+PyMatching==2.2.2
+SQLAlchemy==2.0.40
+

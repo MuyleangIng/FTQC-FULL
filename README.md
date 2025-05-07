@@ -1,64 +1,87 @@
-Fault-Tolerant Quantum Computing (FTQC) API
-This project implements a simulation framework for fault-tolerant quantum computing, including surface code error correction, magic state distillation, and noisy circuit execution. It uses FastAPI for API integration, Stim and Qiskit for simulations, and Pymatching for decoding.
-Project Structure
-ftqc_api/
-├── app.py                 # FastAPI application entry point
-├── config.py              # Configuration settings
-├── requirements.txt       # Project dependencies
-├── api/                   # API endpoints and models
-├── core/                  # Core FTQC components
-├── simulation/            # Simulation utilities
-└── utils/                 # Logging and visualization
+Here's a complete and clear `README.md` to help users set up and run your FastAPI app with `uvicorn` and PostgreSQL via Docker:
 
-Setup
+---
 
-Clone the repository:
-git clone <repository-url>
-cd ftqc_api
+### ✅ `README.md`
 
+````markdown
+# FTQC Backend API
 
-Create a virtual environment:
+This project provides a FastAPI backend for handling fault-tolerant quantum computing (FTQC) simulations and storing results in a PostgreSQL database.
+
+---
+
+## 🚀 Requirements
+
+- Python 3.10.17
+- Docker & Docker Compose
+- `pip` (Python package installer)
+
+---
+
+## 📦 Installation
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/MuyleangIng/ftqc-backend.git
+cd ftqc-backend
+````
+
+### 2. Create a virtual environment (optional but recommended)
+
+```bash
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate   # On Windows: venv\Scripts\activate
+```
 
+### 3. Install Python dependencies
 
-Install dependencies:
+```bash
 pip install -r requirements.txt
+```
 
+---
 
-Run the FastAPI server:
-uvicorn app:app --host 0.0.0.0 --port 8000
+## 🐘 PostgreSQL Setup (via Docker)
 
+Make sure Docker is installed and running. Then start the PostgreSQL container:
 
-Access the API:
+```bash
+docker-compose up -d
+```
 
-Open http://localhost:8000/docs for interactive API documentation.
-Send POST requests to /simulate with a Base64-encoded Python source code.
+* Database Name: `ftqc_db`
+* Username: `postgres`
+* Password: `12345`
+* Host: `localhost`
+* Port: `5443`
 
+Your `.env` or config should contain:
 
+```
+DATABASE_URL=postgresql://postgres:12345@localhost:5443/ftqc_db
+```
 
-Usage
+---
 
-Run a simulation via API:curl -X POST "http://localhost:8000/simulate" -H "Content-Type: application/json" -d '{
-  "source_code": "ZnJvbSBxaXNraXQgaW1wb3J0IFF1YW50dW1DaXJjdWl0CmZyb20gbWF0aCBpbXBvcnQgcGksIGNvcywgc2luLCBzcXJ0CmZyb20gbWF0aCBpbXBvcnQgZXhwCnRoZXRhID0gcGkgLyAyCnBoaSA9IHBpIC8gNAppZiB0aGV0YSA+IHBoaToKICBxYyA9IFF1YW50dW1DaXJjdWl0KDIsIDIpCiAgcWMuaCgwKQogIHFjLmgoMSkKICBxYy5oKDEpCiAgcWMuY3goMCwgMSkKICBmb3IgaSBpbiByYW5nZSgyKToKICAgIHFjLm1lYXN1cmUoaSwgaSkKICBwcmludCgiQ2lyY3VpdCBjcmVhdGVkIHN1Y2Nlc3NmdWxseS4iKQplbHNlOgogIHByaW50KCJObyBjaXJjdWl0IGNyZWF0ZWQuIik=",
-  "iterations": 10,
-  "noise": 0.001,
-  "distance": 3,
-  "rounds": 2,
-  "error_rate": 0.01,
-  "debug": true
-}'
+## 🚦 Run FastAPI Server
 
+Start the server with Uvicorn:
 
+```bash
+uvicorn main:app --port 8000 --reload
+```
 
-Dependencies
+* Open your browser and go to: [http://localhost:8000/docs](http://localhost:8000/docs) for Swagger UI
 
-Python 3.8+
-FastAPI, Uvicorn
-Stim, Qiskit, Qiskit-Aer, Pymatching
-NumPy, Pydantic, python-dateutil
+---
 
-Security Note
-The API executes Base64-encoded Python code, which is restricted to Qiskit operations but not fully sandboxed. For production, implement proper sandboxing (e.g., RestrictedPython) to prevent code injection.
-License
-MIT License
+## 🗃️ Tables Created
+
+* `simulation_results`
+* `job_logs`
+
+These are initialized via `init-db.sql` when Docker PostgreSQL container starts.
+
+---

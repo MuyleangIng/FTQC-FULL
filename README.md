@@ -4,7 +4,6 @@ Here's a complete and clear `README.md` to help users set up and run your FastAP
 
 ### ✅ `README.md`
 
-````markdown
 # FTQC Backend API
 
 This project provides a FastAPI backend for handling fault-tolerant quantum computing (FTQC) simulations and storing results in a PostgreSQL database.
@@ -15,7 +14,6 @@ This project provides a FastAPI backend for handling fault-tolerant quantum comp
 
 - Python 3.10.17
 - Docker & Docker Compose
-- `pip` (Python package installer)
 
 ---
 
@@ -26,7 +24,7 @@ This project provides a FastAPI backend for handling fault-tolerant quantum comp
 ```bash
 git clone https://github.com/MuyleangIng/ftqc-backend.git
 cd ftqc-backend
-````
+```
 
 ### 2. Create a virtual environment (optional but recommended)
 
@@ -48,7 +46,7 @@ pip install -r requirements.txt
 Make sure Docker is installed and running. Then start the PostgreSQL container:
 
 ```bash
-docker-compose up -d
+cd docker && docker-compose up -d
 ```
 
 * Database Name: `ftqc_db`

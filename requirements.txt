@@ -3,7 +3,8 @@ uvicorn==0.32.0
 pydantic==2.9.2
 stim==1.13.0
 qiskit==1.2.4
-qiskit-aer==0.15.1
+#qiskit-aer==0.15.1
+qiskit-aer-gpu==0.15.1
 pymatching==2.2.2
 numpy==2.1.2
 python-dateutil==2.9.0

@@ -45,6 +45,6 @@ Thumbs.db
 encode_circuit.py
 ftqc_streaming_api.py
 pipeline_updated.py
-test_t_gate_high_noise.py
+test/test_t_gate_high_noise.py
 
 

@@ -4,7 +4,6 @@ import stim
 import time
 from qiskit.quantum_info import state_fidelity
 
-
 class MagicStateDistillation:
     def __init__(self, num_input_states, noise_prob, t_gate_id, logical_qubit, debug=False):
         self.num_input_states = num_input_states
@@ -20,12 +19,15 @@ class MagicStateDistillation:
         self.success_count = 0
         self.total_attempts = 0
         self.distillation_time = 0
+        logging.info(f"T{self.t_gate_id} - Initialized MagicStateDistillation: num_input_states={num_input_states}, noise_prob={noise_prob}")
 
     def _log_debug(self, message):
-        logging.debug(message)
-        self.debug_logs.append(message)
+        if self.debug:
+            logging.debug(message)
+            self.debug_logs.append(message)
 
     def build_lookup_table(self):
+        logging.info(f"T{self.t_gate_id} - Building lookup table for syndrome measurements...")
         lookup = {}
         stabilizers = [[0, 1, 2], [0, 1, 3], [0, 2, 4], [1, 3, 4]]
         for qubit in range(self.num_input_states):
@@ -36,14 +38,18 @@ class MagicStateDistillation:
             lookup[tuple(syndrome)] = qubit
         if self.debug:
             self._log_debug(f"DEBUG: T{self.t_gate_id} - Lookup table for MSD: {lookup}")
+        logging.info(f"T{self.t_gate_id} - Lookup table built with {len(lookup)} entries.")
         return lookup
 
     def prepare_noisy_t_state(self, circuit, qubit):
+        logging.info(f"T{self.t_gate_id} - Preparing noisy T-state for qubit {qubit}...")
         circuit.append("H", qubit)
         circuit.append("S", qubit)
         circuit.append("DEPOLARIZE1", qubit, self.noise_prob)
+        logging.info(f"T{self.t_gate_id} - Noisy T-state prepared for qubit {qubit}.")
 
     def syndrome_measurement(self, circuit, data_qubits, ancilla_qubits):
+        logging.info(f"T{self.t_gate_id} - Performing syndrome measurement...")
         stabilizers = [[0, 1, 2], [0, 1, 3], [0, 2, 4], [1, 3, 4]]
         num_measurements = len(stabilizers)
         for idx, ancilla in enumerate(ancilla_qubits):
@@ -54,10 +60,12 @@ class MagicStateDistillation:
                 circuit.append("H", ancilla)
                 circuit.append("M", ancilla)
                 circuit.append("R", ancilla)
+        logging.info(f"T{self.t_gate_id} - Syndrome measurement completed with {num_measurements} measurements.")
         return circuit, num_measurements, stabilizers
 
     def distill_once(self, round_num):
         start_time = time.time()
+        logging.info(f"T{self.t_gate_id} Round {round_num} - Starting distillation attempt")
         if self.debug:
             self._log_debug(f"DEBUG: T{self.t_gate_id} Round {round_num} - Starting distillation attempt")
         circuit = stim.Circuit()
@@ -79,8 +87,7 @@ class MagicStateDistillation:
         syndrome = tuple(1 if m else 0 for m in measurements)
 
         if self.debug:
-            self._log_debug(
-                f"DEBUG: T{self.t_gate_id} Round {round_num} - Measurements: {measurements}, Syndrome: {syndrome}")
+            self._log_debug(f"DEBUG: T{self.t_gate_id} Round {round_num} - Measurements: {measurements}, Syndrome: {syndrome}")
 
         if syndrome in self.lookup_table:
             error_qubit = self.lookup_table[syndrome]
@@ -89,6 +96,7 @@ class MagicStateDistillation:
             success = True
         else:
             success = (syndrome == (0, 0, 0, 0))
+            logging.info(f"T{self.t_gate_id} Round {round_num}: No error detected (syndrome={syndrome}, success={success})")
 
         tableau = simulator.current_inverse_tableau() ** -1
         state = self.tableau_to_state(tableau, qubit=0)
@@ -106,9 +114,11 @@ class MagicStateDistillation:
         if success:
             self.success_count += 1
         self.distillation_time += time.time() - start_time
+        logging.info(f"T{self.t_gate_id} Round {round_num}: Distillation attempt completed (success={success}, time={self.distillation_time:.2f}s)")
         return state, success
 
     def tableau_to_state(self, tableau, qubit):
+        logging.info(f"T{self.t_gate_id} - Computing state from tableau for qubit {qubit}...")
         state = np.array([np.cos(np.pi / 8), np.exp(1j * np.pi / 4) * np.sin(np.pi / 8)])
         pauli_z = tableau.z_output(qubit)
         pauli_x = tableau.x_output(qubit)
@@ -117,6 +127,7 @@ class MagicStateDistillation:
         state = state / np.linalg.norm(state)
         if self.debug:
             self._log_debug(f"DEBUG: T{self.t_gate_id} - Computed state: {state}")
+        logging.info(f"T{self.t_gate_id} - State computation completed for qubit {qubit}.")
         return state
 
     def distill(self, rounds):
@@ -125,16 +136,17 @@ class MagicStateDistillation:
             rounds = min(rounds + 2, 5)
         elif self.noise_prob < 0.001:
             rounds = max(rounds - 1, 1)
+        logging.info(f"T{self.t_gate_id} - Adjusted rounds to {rounds} based on noise {self.noise_prob}")
         if self.debug:
-            self._log_debug(
-                f"DEBUG: T{self.t_gate_id} - Adjusted MSD rounds to {rounds} based on noise {self.noise_prob}")
+            self._log_debug(f"DEBUG: T{self.t_gate_id} - Adjusted MSD rounds to {rounds} based on noise {self.noise_prob}")
 
         current_noise = self.noise_prob
         attempts_this_run = []
         for r in range(rounds):
             self.noise_prob = current_noise
             attempts = 0
-            max_attempts = 1000
+            max_attempts = 50
+            logging.info(f"T{self.t_gate_id} - Starting distillation round {r + 1}...")
             while attempts < max_attempts:
                 state, success = self.distill_once(r + 1)
                 attempts += 1
@@ -148,14 +160,13 @@ class MagicStateDistillation:
                 logging.error(f"T{self.t_gate_id} Round {r + 1} failed after {max_attempts} attempts")
                 return None, 0.0
             current_noise = 35 * (current_noise ** 3)
+            logging.info(f"T{self.t_gate_id} - Round {r + 1} completed. Reduced noise to {current_noise:.6f}")
         self.attempts_per_round.extend(attempts_this_run)
         fidelity = state_fidelity(state, self.ideal_t_state)
         logging.info(f"T{self.t_gate_id} Distilled |T> state fidelity after {rounds} rounds: {fidelity:.4f}")
-        success_rate = self.success_count / self.total_attempts if self.total_attempts > 0 else 0.0
-        logging.info(f"T{self.t_gate_id} MSD Success Rate: {success_rate:.4f}")
+        logging.info(f"T{self.t_gate_id} MSD Success Rate: {self.success_count / self.total_attempts if self.total_attempts > 0 else 0.0:.4f}")
         logging.info(f"T{self.t_gate_id} Noise Reduced From {initial_noise:.6f} to {current_noise:.6f}")
         return state, fidelity
-
 
 class MSDFactory:
     def __init__(self, num_input_states=5, noise_prob=0.001, rounds=2, parallel_units=2, debug=False):
@@ -169,19 +180,22 @@ class MSDFactory:
         self.total_gates_used = 0
         self.total_time = 0
         self.debug_logs = []
+        logging.info(f"MSD Factory initialized: num_input_states={num_input_states}, noise_prob={noise_prob}, rounds={rounds}, parallel_units={parallel_units}")
 
     def _log_debug(self, message):
-        logging.debug(message)
-        self.debug_logs.append(message)
+        if self.debug:
+            logging.debug(message)
+            self.debug_logs.append(message)
 
     def produce_magic_states(self, num_states_needed):
+        logging.info(f"MSD Factory: Producing {num_states_needed} magic states with {self.parallel_units} parallel units")
         if self.debug:
-            self._log_debug(
-                f"MSD Factory: Producing {num_states_needed} magic states with {self.parallel_units} parallel units")
+            self._log_debug(f"MSD Factory: Producing {num_states_needed} magic states with {self.parallel_units} parallel units")
         while len(self.magic_state_buffer) < num_states_needed:
             states_to_produce = min(self.parallel_units, num_states_needed - len(self.magic_state_buffer))
             for unit in range(states_to_produce):
                 t_gate_id = len(self.magic_state_buffer) + 1
+                logging.info(f"MSD Factory: Distilling T-state {t_gate_id} in unit {unit + 1}")
                 if self.debug:
                     self._log_debug(f"MSD Factory: Distilling T state {t_gate_id} in unit {unit + 1}")
                 msd = MagicStateDistillation(
@@ -198,9 +212,11 @@ class MSDFactory:
                     self.total_gates_used += msd.total_attempts * 100
                     self.total_time += msd.distillation_time
                     self.debug_logs.extend(msd.debug_logs)
+                    logging.info(f"MSD Factory: Produced T-state {t_gate_id} with fidelity {fidelity:.4f}")
                 else:
                     logging.error(f"MSD Factory: Failed to produce magic state {t_gate_id}")
                     return False
+        logging.info(f"MSD Factory: Produced {len(self.magic_state_buffer)} magic states")
         if self.debug:
             self._log_debug(f"MSD Factory: Produced {len(self.magic_state_buffer)} magic states")
         return True
@@ -209,4 +225,6 @@ class MSDFactory:
         if not self.magic_state_buffer:
             logging.warning("MSD Factory: Magic state buffer is empty!")
             return None, 0.0
-        return self.magic_state_buffer.pop(0)
+        state, fidelity = self.magic_state_buffer.pop(0)
+        logging.info(f"MSD Factory: Retrieved magic state with fidelity {fidelity:.4f}")
+        return state, fidelity

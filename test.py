@@ -1,35 +1,50 @@
-from qiskit import QuantumCircuit
+from qiskit import QuantumCircuit, transpile
 from qiskit.visualization import circuit_drawer
+import matplotlib.pyplot as plt
 
-# Create the 4-qubit quantum circuit
-qc = QuantumCircuit(4, 4)
-qc.h(0)
-qc.cx(0, 1)
-qc.t(0)
-qc.t(1)
-qc.h(2)
-qc.h(3)
-qc.cx(2, 0)
-qc.cx(3, 1)
-qc.swap(2, 3)
+# === Step 1: Build a mock version of Shor's algorithm circuit ===
+n_count = 4  # Number of counting qubits
+qc = QuantumCircuit(7, 4)  # 4 counting qubits + 3 work qubits (simplified)
 
-qc.t(3)
-qc.t(3)
-qc.t(3)
-qc.cx(2, 3)
-qc.t(3)
-qc.cx(2, 3)
+# Apply Hadamard to counting qubits
+for q in range(n_count):
+    qc.h(q)
 
-qc.h(2)
+# Mock modular exponentiation (not real modexp but has CX and CCX to trigger T gates later)
+qc.cx(3, 4)
+qc.cx(2, 5)
+qc.ccx(1, 5, 6)
+qc.ccx(0, 4, 6)
 
-for _ in range(7): qc.t(3)
-qc.cx(2, 3)
-qc.t(3)
-qc.t(3)
-qc.cx(2, 3)
+# Inverse QFT definition
+def qft_dagger(circ, n):
+    for qubit in range(n // 2):
+        circ.swap(qubit, n - qubit - 1)
+    for j in range(n):
+        for m in range(j):
+            circ.cp(-3.14159 / float(2 ** (j - m)), m, j)
+        circ.h(j)
 
-qc.h(3)
-qc.measure([0, 1, 2, 3], [0, 1, 2, 3])
+# Apply inverse QFT
+qft_dagger(qc, n_count)
 
-# Save the circuit as an image
-circuit_drawer(qc, output='mpl', filename='quantum_circuit.png')
+# Measure counting qubits
+qc.measure(range(n_count), range(n_count))
+
+# === Step 2: Transpile to Clifford+T-compatible gates ===
+t_qc = transpile(
+    qc,
+    basis_gates=['h', 't', 'tdg', 's', 'sdg', 'x', 'cx', 'measure', 'swap'],
+    optimization_level=1
+)
+
+# === Step 3: Display counts of T and other gates ===
+print("=== Transpiled Gate Counts ===")
+print(t_qc.count_ops())
+
+# === Step 4: Draw and save the transpiled circuit ===
+t_qc.draw(output='mpl')
+plt.title("Transpiled Circuit with T Gates (Mock Shor's Algorithm)")
+plt.tight_layout()
+plt.savefig("shor_transpiled_circuit.png")
+plt.show()

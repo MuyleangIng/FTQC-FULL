@@ -1,4 +1,3 @@
-
 import matplotlib.pyplot as plt
 import networkx as nx
 import logging
@@ -7,8 +6,10 @@ import pymatching
 import numpy as np
 
 class EnhancedSurfaceCode:
-    """Production-ready Surface Code simulator with visualization, decoding, and fault injection."""
+    """Production-ready Surface Code simulator with visualization, decoding, fault injection, and lattice surgery."""
     def __init__(self, distance=3, logical_qubit_id=0, num_qubits=None, noise=0.001, error_rate=0.01, debug=False):
+        if distance < 3 or distance > 6:
+            raise ValueError("Distance must be between 3 and 6 for this implementation.")
         self.distance = distance
         self.logical_qubit_id = logical_qubit_id
         self.num_qubits = num_qubits
@@ -27,24 +28,39 @@ class EnhancedSurfaceCode:
         self.gate_times = {'h': 20, 'cx': 40, 't': 50, 'measure': 80}
         self.total_time = 0
         self.syndrome_history = []
+        # For lattice surgery
+        self.logical_state = None  # Logical state (e.g., |0⟩ or |+⟩)
+        self.neighbor_patch = None  # Reference to neighboring patch for lattice surgery
 
     def _generate_stabilizers(self):
         d = self.distance
         stabilizers = []
+
+        # Z-stabilizers (2x2 squares at plaquettes)
         for i in range(d - 1):
             for j in range(d - 1):
-                stab = [i * d + j, i * d + j + 1, (i + 1) * d + j, (i + 1) * d + j + 1]
+                stab = [
+                    i * d + j,           # top-left
+                    i * d + j + 1,       # top-right
+                    (i + 1) * d + j,     # bottom-left
+                    (i + 1) * d + j + 1  # bottom-right
+                ]
                 stabilizers.append(('Z', stab))
+
+        # X-stabilizers (crosses at vertices)
         for i in range(d):
             for j in range(d):
-                if (i + j) % 2 == 1:
+                if (i + j) % 2 == 0:  # Place X-stabilizers at vertices
                     stab = []
-                    if i > 0: stab.append((i - 1) * d + j)
-                    if i < d - 1: stab.append((i + 1) * d + j)
-                    if j > 0: stab.append(i * d + j - 1)
-                    if j < d - 1: stab.append(i * d + j + 1)
-                    if len(stab) >= 2:
+                    if i > 0: stab.append((i - 1) * d + j)       # up
+                    if i < d - 1: stab.append((i + 1) * d + j)   # down
+                    if j > 0: stab.append(i * d + j - 1)         # left
+                    if j < d - 1: stab.append(i * d + j + 1)     # right
+                    if len(stab) >= 2:  # Ensure valid stabilizer
                         stabilizers.append(('X', stab))
+
+        if self.debug:
+            logging.debug(f"Generated {len(stabilizers)} stabilizers for distance {d}")
         return stabilizers
 
     def _build_circuit(self):
@@ -69,9 +85,16 @@ class EnhancedSurfaceCode:
 
     def _build_decoder(self):
         matcher = pymatching.Matching()
-        for i in range(self.num_stabilizers):
-            matcher.add_edge(i, i)
-            matcher.add_boundary_edge(i)
+        added_edges = set()
+        for idx, (typ, qlist) in enumerate(self.stabilizers):
+            for q in qlist:
+                edge = tuple(sorted([idx, q]))
+                if edge not in added_edges:
+                    matcher.add_edge(idx, q, weight=1.0)
+                    added_edges.add(edge)
+                else:
+                    if self.debug:
+                        logging.debug(f"Skipped duplicate edge {edge}")
         return matcher
 
     def measure_syndrome(self):
@@ -104,22 +127,84 @@ class EnhancedSurfaceCode:
         self.total_time = sum(self.gate_times.values()) * self.num_data_qubits
         return self.total_time
 
-    def visualize(self):
+    def initialize_logical_state(self, state='zero'):
+        """Initialize the logical state of the surface code patch."""
+        if state == 'zero':
+            self.logical_state = '|0⟩'
+            # Logical |0⟩: All data qubits in |0⟩ state (already initialized by R)
+        elif state == 'plus':
+            self.logical_state = '|+⟩'
+            # Logical |+⟩: Apply H to all data qubits to create superposition
+            for q in range(self.num_data_qubits):
+                self.circuit.append("H", q)
+        else:
+            raise ValueError("State must be 'zero' or 'plus'")
+        if self.debug:
+            logging.debug(f"Logical qubit {self.logical_qubit_id} initialized to {self.logical_state}")
+
+    def set_neighbor_patch(self, neighbor_patch):
+        """Set a neighboring patch for lattice surgery operations."""
+        if not isinstance(neighbor_patch, EnhancedSurfaceCode):
+            raise ValueError("Neighbor patch must be an EnhancedSurfaceCode instance")
+        self.neighbor_patch = neighbor_patch
+        if self.debug:
+            logging.debug(f"Set neighbor patch for logical qubit {self.logical_qubit_id} to {neighbor_patch.logical_qubit_id}")
+
+    def lattice_surgery_cnot(self, control_patch):
+        """Perform a logical CNOT using lattice surgery between this patch (target) and control_patch."""
+        if self.distance < 5:
+            raise ValueError("Lattice surgery requires distance >= 5 for reliable operations")
+        if not isinstance(control_patch, EnhancedSurfaceCode) or control_patch != self.neighbor_patch:
+            raise ValueError("Control patch must be the set neighbor patch")
+
+        # Step 1: Merge patches by measuring joint X operators along the boundary
+        merge_circuit = stim.Circuit()
+        boundary_qubits = []
         d = self.distance
-        G = nx.Graph()
-        pos = {}
+        # Assume patches are side by side; merge along the right edge of control and left edge of target
         for i in range(d):
-            for j in range(d):
-                idx = i * d + j
-                G.add_node(idx)
-                pos[idx] = (j, -i)
-        for typ, qlist in self.stabilizers:
-            for q1 in qlist:
-                for q2 in qlist:
-                    if q1 != q2:
-                        G.add_edge(q1, q2)
-        # plt.figure(figsize=(6, 6))
-        # nx.draw(G, pos, with_labels=True, node_color='skyblue', node_size=600, font_size=10)
-        # plt.title(f"Surface Code (Logical Qubit {self.logical_qubit_id}, Distance={d})")
-        # plt.axis('off')
-        # plt.show()
+            control_qubit = i * d + (d - 1)  # Rightmost column of control patch
+            target_qubit = i * d  # Leftmost column of target patch
+            ancilla = self.num_data_qubits + self.num_stabilizers + len(boundary_qubits)
+            merge_circuit.append("R", ancilla)
+            merge_circuit.append("CNOT", [ancilla, control_qubit])
+            merge_circuit.append("CNOT", [ancilla, target_qubit])
+            merge_circuit.append("M", ancilla)
+            boundary_qubits.append((control_qubit, target_qubit, ancilla))
+
+        # Step 2: Execute merge circuit and measure syndromes
+        sampler = merge_circuit.compile_detector_sampler()
+        samples = sampler.sample(shots=1, append_observables=False)
+        merge_syndrome = samples[0].tolist()
+
+        # Step 3: Apply corrections based on merge syndrome
+        # Simplified: Assume correction based on syndrome (in practice, more complex)
+        for idx, (control_q, target_q, ancilla) in enumerate(boundary_qubits):
+            if idx < len(merge_syndrome) and merge_syndrome[idx] == 1:
+                self.circuit.append("Z", target_q)  # Apply Z correction on target
+
+        # Step 4: Split patches by measuring joint Z operators
+        split_circuit = stim.Circuit()
+        for i in range(d):
+            control_qubit = i * d + (d - 1)
+            target_qubit = i * d
+            ancilla = self.num_data_qubits + self.num_stabilizers + i
+            split_circuit.append("R", ancilla)
+            split_circuit.append("H", ancilla)
+            split_circuit.append("CNOT", [ancilla, control_qubit])
+            split_circuit.append("CNOT", [ancilla, target_qubit])
+            split_circuit.append("H", ancilla)
+            split_circuit.append("M", ancilla)
+
+        # Step 5: Execute split circuit and measure syndromes
+        sampler = split_circuit.compile_detector_sampler()
+        samples = sampler.sample(shots=1, append_observables=False)
+        split_syndrome = samples[0].tolist()
+
+        # Step 6: Apply corrections based on split syndrome
+        for idx, (control_q, target_q, ancilla) in enumerate(boundary_qubits):
+            if idx < len(split_syndrome) and split_syndrome[idx] == 1:
+                self.circuit.append("X", control_q)  # Apply X correction on control
+
+        if self.debug:
+            logging.debug(f"Performed lattice surgery CNOT: Control qubit {control_patch.logical_qubit_id}, Target qubit {self.logical_qubit_id}")

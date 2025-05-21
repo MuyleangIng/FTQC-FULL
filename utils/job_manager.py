@@ -2,10 +2,8 @@ import threading
 import uuid
 from queue import Queue
 from typing import Dict, Optional
-
 from core.pipeline import FTQCPipeline
 from utils.logging import setup_logging
-
 
 class SimulationJob:
     def __init__(self, job_id: str, user_id: str, params: dict):
@@ -20,17 +18,17 @@ class SimulationJob:
 
     def run(self, logger):
         self.status = "running"
-        self.event.set()  # Allow running
+        self.event.set()
         try:
             pipeline = FTQCPipeline(
                 circuit=self.params["source_code"],
                 iterations=self.params["iterations"],
                 noise=self.params["noise"],
-                code_distance=self.params["distance"],
-                msd_rounds=self.params["rounds"],
+                distance=self.params["distance"],
+                rounds=self.params["rounds"],
                 logger=logger
             )
-            self.result = pipeline.run_simulation()
+            self.result = pipeline.run()
             self.status = "completed"
         except Exception as e:
             logger.error(f"Job {self.job_id} failed: {str(e)}")
@@ -51,20 +49,31 @@ class SimulationJob:
         self.status = "stopped"
 
 class JobManager:
-    def __init__(self):
+    def __init__(self, max_jobs: int = 50):
         self.jobs: Dict[str, SimulationJob] = {}
         self.lock = threading.Lock()
-        self.logger_queue = Queue()
+        self.max_jobs = max_jobs
+        self.job_queue = Queue()
 
     def submit_job(self, user_id: str, params: dict) -> str:
-        job_id = str(uuid.uuid4())
-        logger = setup_logging(user_id=user_id, job_id=job_id)
-        job = SimulationJob(job_id, user_id, params)
         with self.lock:
+            if len(self.jobs) >= self.max_jobs:
+                raise RuntimeError("Maximum number of concurrent jobs reached")
+            job_id = str(uuid.uuid4())
+            logger = setup_logging(user_id=user_id, job_id=job_id)
+            job = SimulationJob(job_id, user_id, params)
             self.jobs[job_id] = job
-        job.thread = threading.Thread(target=job.run, args=(logger,))
+        job.thread = threading.Thread(target=self._run_job, args=(job, logger))
         job.thread.start()
         return job_id
+
+    def _run_job(self, job: SimulationJob, logger):
+        try:
+            job.run(logger)
+        finally:
+            with self.lock:
+                if job.status in ["completed", "failed", "stopped"]:
+                    self.jobs.pop(job.job_id, None)
 
     def get_job_status(self, job_id: str) -> Optional[dict]:
         with self.lock:
@@ -92,5 +101,7 @@ class JobManager:
         with self.lock:
             job = self.jobs.get(job_id)
             if job and job.status in ["completed", "failed"]:
-                return job.result
+                result = job.result
+                self.jobs.pop(job_id, None)
+                return result
             return None

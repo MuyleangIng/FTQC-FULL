@@ -21,7 +21,7 @@ from sqlalchemy.orm import sessionmaker, Session as SQLSession
 from fastapi import APIRouter, HTTPException, Depends, FastAPI
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.middleware.cors import CORSMiddleware  # Add CORS middleware
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, PositiveInt
 from config import LOGS_DIR, DATABASE_URL, MAX_THREADS
 import matplotlib
@@ -34,10 +34,9 @@ app = FastAPI(
     version="1.0.0"
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
-# Add CORS middleware to allow frontend requests
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins (adjust for production)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -216,28 +215,22 @@ async def log_streamer(job_id: str) -> AsyncGenerator[str, None]:
         yield f"data: Log file for job {job_id} not found\n\n"
         return
 
-    # Read all existing lines from the log file
     with open(job_log.log_file, "r") as f:
-        # Start from the beginning to read all existing logs
         lines = f.readlines()
         for line in lines:
             yield f"data: {line.strip()}\n\n"
-            await asyncio.sleep(0.01)  # Small delay to ensure proper streaming
 
-        # Now monitor for new lines if the job is still running
         f.seek(0, os.SEEK_END)
         while True:
             line = f.readline()
             if line:
                 yield f"data: {line.strip()}\n\n"
-                await asyncio.sleep(0.01)  # Small delay to ensure proper streaming
+                await asyncio.sleep(0.01)
             else:
-                # Check if the job is still running
                 if thread_manager.get_job_status(job_id) not in ["completed", "failed"]:
-                    await asyncio.sleep(0.1)  # Wait for more logs
+                    await asyncio.sleep(0.1)
                 else:
-                    # Keep the stream open for a bit longer to ensure all logs are flushed
-                    for _ in range(50):  # Keep the stream alive for 5 seconds
+                    for _ in range(50):
                         line = f.readline()
                         if line:
                             yield f"data: {line.strip()}\n\n"
@@ -471,7 +464,14 @@ async def get_json(user_id: int, job_id: str, db: SQLSession = Depends(get_db)):
         json_path = os.path.join(LOGS_DIR, f"ftqc_pipeline_response-{result.simulation_id}.json")
         if os.path.exists(json_path):
             with open(json_path, 'r') as f:
-                return json.load(f)
+                json_data = json.load(f)
+                job_log = db.query(JobLog).filter_by(job_id=job_id).first()
+                logs = []
+                if job_log and os.path.exists(job_log.log_file):
+                    with open(job_log.log_file, 'r') as log_file:
+                        logs = [line.strip() for line in log_file.readlines()]
+                json_data["logs"] = logs
+                return json_data
         raise HTTPException(status_code=404, detail="JSON file not found")
     raise HTTPException(status_code=404, detail="Simulation not found")
 
